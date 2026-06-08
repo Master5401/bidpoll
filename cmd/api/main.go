@@ -72,7 +72,11 @@ func main() {
 
 	// Route incoming Discord traffic strictly through the handler
 	http.HandleFunc("/api/interactions", discordHandler.HandleInteraction)
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080" // Fallback for local development
+	}
 
-	log.Println("[BOOT] BidPoll Engine fired up online. Listening on :8080")
-	log.Fatal(http.ListenAndServe(":8080", nil))
+	log.Printf("[BOOT] BidPoll Engine online. Listening on :%s", port)
+	log.Fatal(http.ListenAndServe(":"+port, nil))
 }
