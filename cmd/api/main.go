@@ -5,8 +5,10 @@ import (
 	"database/sql"
 	"log"
 	"net/http"
+	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	migrate "github.com/golang-migrate/migrate/v4"
 	"github.com/golang-migrate/migrate/v4/database/postgres"

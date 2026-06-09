@@ -313,6 +313,38 @@ func (h *Handler) refreshPollMessage(ctx context.Context, optionID, channelID, m
 	}
 }
 
+func (h *Handler) patchWithRateLimit(url string, jsonData []byte) {
+	for {
+		req, _ := http.NewRequest("PATCH", url, bytes.NewBuffer(jsonData))
+		req.Header.Set("Authorization", "Bot "+h.botToken)
+		req.Header.Set("Content-Type", "application/json")
+
+		resp, err := (&http.Client{Timeout: 5 * time.Second}).Do(req)
+		if err != nil {
+			log.Printf("[DISCORD] PATCH network error: %v", err)
+			return
+		}
+
+		if resp.StatusCode == http.StatusTooManyRequests {
+			var rl struct {
+				RetryAfter float64 `json:"retry_after"`
+			}
+			json.NewDecoder(resp.Body).Decode(&rl)
+			resp.Body.Close()
+			wait := time.Duration(rl.RetryAfter * float64(time.Second))
+			log.Printf("[DISCORD] Rate limited. Respecting retry_after: %v", wait)
+			time.Sleep(wait)
+			continue
+		}
+
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			log.Printf("[DISCORD] PATCH returned %d", resp.StatusCode)
+		}
+		return
+	}
+}
+
 // ── Component Builders ────────────────────────────────────────────────────────
 
 func buildModalJSON() []byte {
