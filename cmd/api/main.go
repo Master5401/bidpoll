@@ -5,7 +5,8 @@ import (
 	"database/sql"
 	"log"
 	"net/http"
-	"os"
+	"os/signal"
+	"syscall"
 
 	migrate "github.com/golang-migrate/migrate/v4"
 	"github.com/golang-migrate/migrate/v4/database/postgres"
@@ -67,8 +68,21 @@ func main() {
 	})
 
 	// 5. Wire the Inbound Adapter (The Front Gate)
+	appID := os.Getenv("DISCORD_APP_ID")
+	botToken := os.Getenv("DISCORD_BOT_TOKEN")
 	discordPubKey := os.Getenv("DISCORD_PUBLIC_KEY")
-	discordHandler := discordAdapter.NewHandler(engine, discordPubKey)
+	discordHandler := discordAdapter.NewHandler(engine, discordPubKey, appID, botToken)
+
+	if appID == "" || botToken == "" {
+		log.Println("[WARNING] DISCORD_APP_ID or DISCORD_BOT_TOKEN missing. Skipping command registration.")
+	} else {
+		err := discordAdapter.RegisterSlashCommands(appID, botToken)
+		if err != nil {
+			log.Printf("[WARNING] Failed to register slash commands: %v", err)
+		} else {
+			log.Println("[BOOT] Slash commands successfully registered with Discord API.")
+		}
+	}
 
 	// Route incoming Discord traffic strictly through the handler
 	http.HandleFunc("/api/interactions", discordHandler.HandleInteraction)
@@ -77,6 +91,25 @@ func main() {
 		port = "8080" // Fallback for local development
 	}
 
-	log.Printf("[BOOT] BidPoll Engine online. Listening on :%s", port)
-	log.Fatal(http.ListenAndServe(":"+port, nil))
+	server := &http.Server{Addr: ":" + port}
+
+	go func() {
+		log.Printf("[BOOT] BidPoll Engine online. Listening on :%s", port)
+		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("Server error: %v", err)
+		}
+	}()
+
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGTERM, syscall.SIGINT)
+	<-quit
+
+	log.Println("[SHUTDOWN] Signal received. Closing HTTP gate...")
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	server.Shutdown(shutdownCtx)
+
+	log.Println("[SHUTDOWN] Draining in-flight goroutines...")
+	discordHandler.Drain()
+	log.Println("[SHUTDOWN] Clean exit.")
 }

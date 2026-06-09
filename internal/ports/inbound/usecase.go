@@ -2,16 +2,51 @@ package inbound
 
 import "context"
 
-// ClaimOptionCommand is a data transfer object. It moves data from the outside world into the engine.
+// ── Commands ──────────────────────────────────────────────────────────────────
+
 type ClaimOptionCommand struct {
 	PollID    string
 	OptionID  string
 	UserID    string
 	Platform  string
 	MessageID string
+	ChannelID string
 }
 
-// PollUseCase is the Left Gate. Discord and Slack MUST use this interface to talk to the Engine.
+type CreatePollCommand struct {
+	Question  string
+	Options   []string
+	CreatedBy string
+	ChannelID string
+}
+
+// ── Read-side DTOs ────────────────────────────────────────────────────────────
+
+type OptionView struct {
+	ID     string
+	Text   string
+	State  string  // "FREE" or "LOCKED"
+	HeldBy *string // nil if FREE
+}
+
+type CreatePollResult struct {
+	PollID  string
+	Options []OptionView
+}
+
+type PollView struct {
+	ID        string
+	ChannelID string
+	MessageID string
+	Options   []OptionView
+}
+
+// ── The Left Gate ─────────────────────────────────────────────────────────────
+
+// PollUseCase is the only contract Discord (and future Slack/Telegram adapters) may call.
 type PollUseCase interface {
 	ClaimOption(ctx context.Context, cmd ClaimOptionCommand) error
+	CreatePoll(ctx context.Context, cmd CreatePollCommand) (*CreatePollResult, error)
+	UpdatePollMessage(ctx context.Context, pollID, messageID string) error
+	GetPollByOptionID(ctx context.Context, optionID string) (*PollView, error)
 }

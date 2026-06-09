@@ -9,47 +9,117 @@ import (
 	"github.com/shakunth/bidpoll/internal/ports/outbound"
 )
 
-// PollRepo is the physical machinery that talks to the database.
 type PollRepo struct {
 	db *sql.DB
 }
 
-// NewPollRepo is the constructor. It requires a live database connection pool.
 func NewPollRepo(db *sql.DB) *PollRepo {
 	return &PollRepo{db: db}
 }
 
-// AttemptAtomicLock executes the single-query optimistic lock.
-func (r *PollRepo) AttemptAtomicLock(ctx context.Context, optionID string, userID string) error {
-	// 1. The raw SQL string using positional parameters. No stray quotes.
+func (r *PollRepo) AttemptAtomicLock(ctx context.Context, optionID, userID string) error {
 	query := `
-		UPDATE poll_options 
-		SET state = 'LOCKED', 
-		    held_by = $1, 
-		    locked_at = NOW() 
-		WHERE id = $2 
-		  AND state = 'FREE'
-	`
-
-	// 2. Fire the query through the connection pool.
+        UPDATE poll_options
+        SET state = 'LOCKED', held_by = $1, locked_at = NOW()
+        WHERE id = $2 AND state = 'FREE'
+    `
 	result, err := r.db.ExecContext(ctx, query, userID, optionID)
 	if err != nil {
 		return fmt.Errorf("database error: %w", err)
 	}
-
-	// 3. Extract the integer telling you how many rows actually changed.
 	rows, err := result.RowsAffected()
 	if err != nil {
-		return fmt.Errorf("failed to get rows affected: %w", err)
+		return fmt.Errorf("rows affected check failed: %w", err)
 	}
-
-	// 4. Enforce the physics of the domain.
 	if rows == 0 {
 		return domain.ErrOptionAlreadyClaimed
 	}
-
 	return nil
 }
 
-// Compile-Time Verification: Proves this struct satisfies the interface.
+func (r *PollRepo) CreatePoll(ctx context.Context, title, createdBy, channelID string) (string, error) {
+	var id string
+	query := `INSERT INTO polls (title, created_by, channel_id) VALUES ($1, $2, $3) RETURNING id`
+	err := r.db.QueryRowContext(ctx, query, title, createdBy, channelID).Scan(&id)
+	if err != nil {
+		return "", fmt.Errorf("failed to insert poll: %w", err)
+	}
+	return id, nil
+}
+
+func (r *PollRepo) AddOption(ctx context.Context, pollID, text string) (string, error) {
+	var id string
+	query := `INSERT INTO poll_options (poll_id, text) VALUES ($1, $2) RETURNING id`
+	err := r.db.QueryRowContext(ctx, query, pollID, text).Scan(&id)
+	if err != nil {
+		return "", fmt.Errorf("failed to insert option: %w", err)
+	}
+	return id, nil
+}
+
+func (r *PollRepo) UpdatePollMessage(ctx context.Context, pollID, messageID string) error {
+	_, err := r.db.ExecContext(ctx, `UPDATE polls SET message_id = $1 WHERE id = $2`, messageID, pollID)
+	return err
+}
+
+func (r *PollRepo) GetPollWithOptions(ctx context.Context, optionID string) (*domain.Poll, error) {
+	// Subquery finds the parent poll for this option; then we pull all sibling options.
+	query := `
+        SELECT
+            p.id,
+            p.title,
+            p.created_by,
+            COALESCE(p.channel_id, '') AS channel_id,
+            COALESCE(p.message_id, '') AS message_id,
+            po.id       AS opt_id,
+            po.text     AS opt_text,
+            po.state    AS opt_state,
+            po.held_by  AS opt_held_by
+        FROM polls p
+        JOIN poll_options po ON po.poll_id = p.id
+        WHERE p.id = (SELECT poll_id FROM poll_options WHERE id = $1)
+        ORDER BY po.created_at ASC
+    `
+	rows, err := r.db.QueryContext(ctx, query, optionID)
+	if err != nil {
+		return nil, fmt.Errorf("query failed: %w", err)
+	}
+	defer rows.Close()
+
+	var poll *domain.Poll
+	for rows.Next() {
+		var (
+			pollID, title, createdBy, channelID, messageID string
+			optID, optText, optState                       string
+			heldBy                                         *string
+		)
+		if err := rows.Scan(
+			&pollID, &title, &createdBy, &channelID, &messageID,
+			&optID, &optText, &optState, &heldBy,
+		); err != nil {
+			return nil, fmt.Errorf("scan failed: %w", err)
+		}
+		if poll == nil {
+			poll = &domain.Poll{
+				ID:        pollID,
+				Title:     title,
+				CreatedBy: createdBy,
+				ChannelID: channelID,
+				MessageID: messageID,
+			}
+		}
+		poll.Options = append(poll.Options, domain.PollOption{
+			ID:     optID,
+			PollID: pollID,
+			Text:   optText,
+			State:  domain.OptionState(optState),
+			HeldBy: heldBy,
+		})
+	}
+	if poll == nil {
+		return nil, domain.ErrPollNotFound
+	}
+	return poll, nil
+}
+
 var _ outbound.PollRepository = (*PollRepo)(nil)
