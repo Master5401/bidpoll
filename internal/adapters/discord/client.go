@@ -36,7 +36,6 @@ func (h *Handler) spawn(fn func()) {
 }
 
 // Drain blocks until every in-flight operation completes.
-// Call this after the HTTP server stops accepting new requests.
 func (h *Handler) Drain() {
 	h.wg.Wait()
 }
@@ -79,7 +78,7 @@ func RegisterSlashCommands(appID, botToken string) error {
 }
 
 func (h *Handler) HandleInteraction(w http.ResponseWriter, r *http.Request) {
-	// ── Signature verification ────────────────────────────────────────────────
+	// ── Signature verification ──
 	sigHex := r.Header.Get("X-Signature-Ed25519")
 	ts := r.Header.Get("X-Signature-Timestamp")
 	if sigHex == "" || ts == "" {
@@ -101,7 +100,6 @@ func (h *Handler) HandleInteraction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// ── Decode top-level fields ───────────────────────────────────────────────
 	var p struct {
 		Type      int    `json:"type"`
 		ChannelID string `json:"channel_id"`
@@ -126,34 +124,22 @@ func (h *Handler) HandleInteraction(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
 	switch p.Type {
-	case 1: // PING
+	case 1:
 		w.Write([]byte(`{"type":1}`))
-
-	case 2: // SLASH COMMAND → fire the modal
+	case 2:
 		w.Write(buildModalJSON())
-
-	case 5: // MODAL_SUBMIT
+	case 5:
 		h.handleModalSubmit(r.Context(), w, rawBody, p.Member.User.ID, p.ChannelID, p.Token)
-
-	case 3: // BUTTON CLICK
-		// Respond immediately — silent ACK, no visible effect on the user
+	case 3:
 		w.Write([]byte(`{"type":6}`))
 		h.spawn(func() {
-			h.handleClaim(
-				context.Background(),
-				p.Data.CustomID, // = option UUID stored as button custom_id
-				p.Member.User.ID,
-				p.ChannelID,
-				p.Message.ID,
-			)
+			h.handleClaim(context.Background(), p.Data.CustomID, p.Member.User.ID, p.ChannelID, p.Message.ID)
 		})
-
 	default:
 		http.Error(w, "unknown interaction type", http.StatusBadRequest)
 	}
 }
 
-// handleClaim: DB write + message refresh, runs in a goroutine.
 func (h *Handler) handleClaim(ctx context.Context, optionID, userID, channelID, messageID string) {
 	err := h.engine.ClaimOption(ctx, inbound.ClaimOptionCommand{
 		OptionID:  optionID,
@@ -163,21 +149,16 @@ func (h *Handler) handleClaim(ctx context.Context, optionID, userID, channelID, 
 		ChannelID: channelID,
 	})
 	if err != nil {
-		log.Printf("[DISCORD] Claim rejected — option %s by user %s: %v", optionID, userID, err)
-		return // Option already taken; original message stays unchanged, no action needed
+		log.Printf("[DISCORD] Claim rejected: %v", err)
+		return
 	}
 	h.refreshPollMessage(ctx, optionID, channelID, messageID)
 }
 
-// handleModalSubmit: parse form values, create poll, send message.
-func (h *Handler) handleModalSubmit(
-	ctx context.Context, w http.ResponseWriter,
-	rawBody []byte, userID, channelID, token string,
-) {
+func (h *Handler) handleModalSubmit(ctx context.Context, w http.ResponseWriter, rawBody []byte, userID, channelID, token string) {
 	var modal struct {
 		Data struct {
 			Components []struct {
-				Type       int `json:"type"`
 				Components []struct {
 					CustomID string `json:"custom_id"`
 					Value    string `json:"value"`
@@ -185,18 +166,14 @@ func (h *Handler) handleModalSubmit(
 			} `json:"components"`
 		} `json:"data"`
 	}
-	if err := json.Unmarshal(rawBody, &modal); err != nil {
-		http.Error(w, "invalid modal payload", http.StatusBadRequest)
-		return
-	}
+	json.Unmarshal(rawBody, &modal)
 
 	question, optionsRaw := "", ""
 	for _, row := range modal.Data.Components {
 		for _, field := range row.Components {
-			switch field.CustomID {
-			case "input_question":
+			if field.CustomID == "input_question" {
 				question = field.Value
-			case "input_options":
+			} else if field.CustomID == "input_options" {
 				optionsRaw = field.Value
 			}
 		}
@@ -207,8 +184,8 @@ func (h *Handler) handleModalSubmit(
 	case len(options) < 2:
 		w.Write([]byte(`{"type":4,"data":{"content":"❌ Need at least 2 options.","flags":64}}`))
 		return
-	case len(options) > 5:
-		w.Write([]byte(`{"type":4,"data":{"content":"❌ Max 5 options (Discord button row limit).","flags":64}}`))
+	case len(options) > 25:
+		w.Write([]byte(`{"type":4,"data":{"content":"❌ Max 25 options.","flags":64}}`))
 		return
 	}
 
@@ -219,12 +196,10 @@ func (h *Handler) handleModalSubmit(
 		ChannelID: channelID,
 	})
 	if err != nil {
-		log.Printf("[DISCORD] CreatePoll failed: %v", err)
-		w.Write([]byte(`{"type":4,"data":{"content":"❌ Failed to create poll. Try again.","flags":64}}`))
+		w.Write([]byte(`{"type":4,"data":{"content":"❌ Failed to create poll.","flags":64}}`))
 		return
 	}
 
-	// Post the poll message to the channel via interaction response
 	response := map[string]interface{}{
 		"type": 4,
 		"data": map[string]interface{}{
@@ -234,11 +209,9 @@ func (h *Handler) handleModalSubmit(
 	}
 	json.NewEncoder(w).Encode(response)
 
-	// Async: retrieve the posted message ID and store it in DB
 	h.spawn(func() { h.anchorPollToMessage(context.Background(), result.PollID, token) })
 }
 
-// anchorPollToMessage fetches the interaction response message and persists its ID.
 func (h *Handler) anchorPollToMessage(ctx context.Context, pollID, token string) {
 	url := fmt.Sprintf("https://discord.com/api/v10/webhooks/%s/%s/messages/@original", h.appID, token)
 	client := &http.Client{Timeout: 5 * time.Second}
@@ -246,17 +219,11 @@ func (h *Handler) anchorPollToMessage(ctx context.Context, pollID, token string)
 	backoff := 500 * time.Millisecond
 	for attempt := 1; attempt <= 3; attempt++ {
 		time.Sleep(backoff)
-
 		resp, err := client.Get(url)
-		if err != nil {
-			log.Printf("[DISCORD] Anchor attempt %d — network error: %v", attempt, err)
-			backoff *= 2
-			continue
-		}
-
-		if resp.StatusCode != http.StatusOK {
-			resp.Body.Close()
-			log.Printf("[DISCORD] Anchor attempt %d — got HTTP %d", attempt, resp.StatusCode)
+		if err != nil || resp.StatusCode != http.StatusOK {
+			if resp != nil {
+				resp.Body.Close()
+			}
 			backoff *= 2
 			continue
 		}
@@ -264,53 +231,32 @@ func (h *Handler) anchorPollToMessage(ctx context.Context, pollID, token string)
 		var msg struct {
 			ID string `json:"id"`
 		}
-		decodeErr := json.NewDecoder(resp.Body).Decode(&msg)
-		resp.Body.Close() // explicit — no defer inside a loop
+		json.NewDecoder(resp.Body).Decode(&msg)
+		resp.Body.Close()
 
-		if decodeErr != nil || msg.ID == "" {
-			log.Printf("[DISCORD] Anchor attempt %d — decode failed or empty ID", attempt)
-			backoff *= 2
-			continue
+		if msg.ID != "" {
+			h.engine.UpdatePollMessage(ctx, pollID, msg.ID)
+			return
 		}
-
-		if err := h.engine.UpdatePollMessage(ctx, pollID, msg.ID); err != nil {
-			log.Printf("[DISCORD] Anchor DB write failed for poll %s: %v", pollID, err)
-		} else {
-			log.Printf("[DISCORD] Poll %s anchored to message %s (attempt %d)", pollID, msg.ID, attempt)
-		}
-		return
 	}
-	log.Printf("[DISCORD] Poll %s orphaned — all 3 anchor attempts exhausted", pollID)
 }
 
-// refreshPollMessage rebuilds the button layout and PATCHes the original poll message.
+// refreshPollMessage uses a per-message mutex lock to prevent concurrent state tearing
 func (h *Handler) refreshPollMessage(ctx context.Context, optionID, channelID, messageID string) {
+	mu, _ := h.patchLocks.LoadOrStore(messageID, &sync.Mutex{})
+	mu.(*sync.Mutex).Lock()
+	defer mu.(*sync.Mutex).Unlock()
+
 	poll, err := h.engine.GetPollByOptionID(ctx, optionID)
 	if err != nil {
-		log.Printf("[DISCORD] GetPollByOptionID failed: %v", err)
 		return
 	}
 
-	patchBody := map[string]interface{}{
-		"components": buildUpdatedButtonRow(poll.Options),
-	}
+	patchBody := map[string]interface{}{"components": buildUpdatedButtonRow(poll.Options)}
 	jsonData, _ := json.Marshal(patchBody)
 
 	url := fmt.Sprintf("https://discord.com/api/v10/channels/%s/messages/%s", channelID, messageID)
-	req, _ := http.NewRequest("PATCH", url, bytes.NewBuffer(jsonData))
-	req.Header.Set("Authorization", "Bot "+h.botToken)
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := (&http.Client{Timeout: 5 * time.Second}).Do(req)
-	if err != nil {
-		log.Printf("[DISCORD] PATCH failed: %v", err)
-		return
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		b, _ := io.ReadAll(resp.Body)
-		log.Printf("[DISCORD] PATCH non-200: %d — %s", resp.StatusCode, b)
-	}
+	h.patchWithRateLimit(url, jsonData)
 }
 
 func (h *Handler) patchWithRateLimit(url string, jsonData []byte) {
@@ -321,7 +267,6 @@ func (h *Handler) patchWithRateLimit(url string, jsonData []byte) {
 
 		resp, err := (&http.Client{Timeout: 5 * time.Second}).Do(req)
 		if err != nil {
-			log.Printf("[DISCORD] PATCH network error: %v", err)
 			return
 		}
 
@@ -331,21 +276,15 @@ func (h *Handler) patchWithRateLimit(url string, jsonData []byte) {
 			}
 			json.NewDecoder(resp.Body).Decode(&rl)
 			resp.Body.Close()
-			wait := time.Duration(rl.RetryAfter * float64(time.Second))
-			log.Printf("[DISCORD] Rate limited. Respecting retry_after: %v", wait)
-			time.Sleep(wait)
+			time.Sleep(time.Duration(rl.RetryAfter * float64(time.Second)))
 			continue
 		}
-
 		resp.Body.Close()
-		if resp.StatusCode != http.StatusOK {
-			log.Printf("[DISCORD] PATCH returned %d", resp.StatusCode)
-		}
 		return
 	}
 }
 
-// ── Component Builders ────────────────────────────────────────────────────────
+// ── Component Builders (Chunking Logic) ──
 
 func buildModalJSON() []byte {
 	return []byte(`{
@@ -354,65 +293,59 @@ func buildModalJSON() []byte {
             "title": "Create a BidPoll",
             "custom_id": "modal_create_poll",
             "components": [
-                {"type":1,"components":[{
-                    "type":4,"custom_id":"input_question",
-                    "label":"Question","style":1,
-                    "min_length":5,"max_length":100,"required":true,
-                    "placeholder":"Who wins the championship?"
-                }]},
-                {"type":1,"components":[{
-                    "type":4,"custom_id":"input_options",
-                    "label":"Options (one per line, max 5)","style":2,
-                    "min_length":3,"max_length":500,"required":true,
-                    "placeholder":"Batman\nSuperman\nWonder Woman"
-                }]}
+                {"type":1,"components":[{"type":4,"custom_id":"input_question","label":"Question","style":1,"min_length":5,"max_length":100,"required":true,"placeholder":"Who wins the championship?"}]},
+                {"type":1,"components":[{"type":4,"custom_id":"input_options","label":"Options (one per line, max 25)","style":2,"min_length":3,"max_length":500,"required":true,"placeholder":"Batman\nSuperman\nWonder Woman"}]}
             ]
         }
     }`)
 }
 
 func buildFreeButtonRow(options []inbound.OptionView) []map[string]interface{} {
-	buttons := make([]interface{}, len(options))
+	var rows []map[string]interface{}
+	var currentRow []interface{}
+
 	for i, opt := range options {
-		buttons[i] = map[string]interface{}{
-			"type":      2,
-			"label":     truncate(opt.Text, 80),
-			"style":     1,      // PRIMARY — blurple
-			"custom_id": opt.ID, // option UUID; this is what we get back on click
+		currentRow = append(currentRow, map[string]interface{}{
+			"type": 2, "label": truncate(opt.Text, 80), "style": 1, "custom_id": opt.ID,
+		})
+		if len(currentRow) == 5 || i == len(options)-1 {
+			rows = append(rows, map[string]interface{}{"type": 1, "components": currentRow})
+			currentRow = nil
 		}
 	}
-	return []map[string]interface{}{{"type": 1, "components": buttons}}
+	return rows
 }
 
 func buildUpdatedButtonRow(options []inbound.OptionView) []map[string]interface{} {
-	buttons := make([]interface{}, len(options))
+	var rows []map[string]interface{}
+	var currentRow []interface{}
+
 	for i, opt := range options {
+		style := 1
+		label := truncate(opt.Text, 80)
+		disabled := false
+
 		if opt.State == "LOCKED" {
-			buttons[i] = map[string]interface{}{
-				"type":      2,
-				"label":     truncate("🔒 "+opt.Text, 80),
-				"style":     2, // SECONDARY — grey
-				"custom_id": opt.ID,
-				"disabled":  true,
-			}
-		} else {
-			buttons[i] = map[string]interface{}{
-				"type":      2,
-				"label":     truncate(opt.Text, 80),
-				"style":     1,
-				"custom_id": opt.ID,
-			}
+			style = 2
+			label = truncate("🔒 "+opt.Text, 80)
+			disabled = true
+		}
+
+		currentRow = append(currentRow, map[string]interface{}{
+			"type": 2, "label": label, "style": style, "custom_id": opt.ID, "disabled": disabled,
+		})
+
+		if len(currentRow) == 5 || i == len(options)-1 {
+			rows = append(rows, map[string]interface{}{"type": 1, "components": currentRow})
+			currentRow = nil
 		}
 	}
-	return []map[string]interface{}{{"type": 1, "components": buttons}}
+	return rows
 }
 
-// ── Utilities ─────────────────────────────────────────────────────────────────
-
 func parseOptions(raw string) []string {
-	lines := strings.Split(raw, "\n")
-	out := make([]string, 0, len(lines))
-	for _, l := range lines {
+	var out []string
+	for _, l := range strings.Split(raw, "\n") {
 		if t := strings.TrimSpace(l); t != "" {
 			out = append(out, t)
 		}
