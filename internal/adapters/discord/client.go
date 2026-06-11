@@ -284,14 +284,7 @@ func (h *Handler) anchorPollToMessage(ctx context.Context, pollID, token string)
 }
 
 // refreshPollMessage rebuilds the button layout and PATCHes the original poll message.
-// refreshPollMessage rebuilds the button layout and PATCHes the original poll message.
 func (h *Handler) refreshPollMessage(ctx context.Context, optionID, channelID, messageID string) {
-	// CRITICAL: All PATCH goroutines for this message queue here.
-	// Each one reads DB state INSIDE the lock, so the last one out sees all claims perfectly.
-	mu, _ := h.patchLocks.LoadOrStore(messageID, &sync.Mutex{})
-	mu.(*sync.Mutex).Lock()
-	defer mu.(*sync.Mutex).Unlock()
-
 	poll, err := h.engine.GetPollByOptionID(ctx, optionID)
 	if err != nil {
 		log.Printf("[DISCORD] GetPollByOptionID failed: %v", err)
@@ -304,7 +297,20 @@ func (h *Handler) refreshPollMessage(ctx context.Context, optionID, channelID, m
 	jsonData, _ := json.Marshal(patchBody)
 
 	url := fmt.Sprintf("https://discord.com/api/v10/channels/%s/messages/%s", channelID, messageID)
-	h.patchWithRateLimit(url, jsonData)
+	req, _ := http.NewRequest("PATCH", url, bytes.NewBuffer(jsonData))
+	req.Header.Set("Authorization", "Bot "+h.botToken)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := (&http.Client{Timeout: 5 * time.Second}).Do(req)
+	if err != nil {
+		log.Printf("[DISCORD] PATCH failed: %v", err)
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		b, _ := io.ReadAll(resp.Body)
+		log.Printf("[DISCORD] PATCH non-200: %d — %s", resp.StatusCode, b)
+	}
 }
 
 func (h *Handler) patchWithRateLimit(url string, jsonData []byte) {
@@ -366,35 +372,23 @@ func buildModalJSON() []byte {
 }
 
 func buildFreeButtonRow(options []inbound.OptionView) []map[string]interface{} {
-	var rows []map[string]interface{}
-
-	for _, opt := range options {
-		// Build the individual button
-		button := map[string]interface{}{
+	buttons := make([]interface{}, len(options))
+	for i, opt := range options {
+		buttons[i] = map[string]interface{}{
 			"type":      2,
 			"label":     truncate(opt.Text, 80),
-			"style":     1, // PRIMARY — blurple
-			"custom_id": opt.ID,
+			"style":     1,      // PRIMARY — blurple
+			"custom_id": opt.ID, // option UUID; this is what we get back on click
 		}
-
-		// Wrap THIS single button in its own Action Row, forcing a new line
-		actionRow := map[string]interface{}{
-			"type":       1,
-			"components": []interface{}{button},
-		}
-		rows = append(rows, actionRow)
 	}
-	return rows
+	return []map[string]interface{}{{"type": 1, "components": buttons}}
 }
 
 func buildUpdatedButtonRow(options []inbound.OptionView) []map[string]interface{} {
-	var rows []map[string]interface{}
-
-	for _, opt := range options {
-		var button map[string]interface{}
-
+	buttons := make([]interface{}, len(options))
+	for i, opt := range options {
 		if opt.State == "LOCKED" {
-			button = map[string]interface{}{
+			buttons[i] = map[string]interface{}{
 				"type":      2,
 				"label":     truncate("🔒 "+opt.Text, 80),
 				"style":     2, // SECONDARY — grey
@@ -402,22 +396,15 @@ func buildUpdatedButtonRow(options []inbound.OptionView) []map[string]interface{
 				"disabled":  true,
 			}
 		} else {
-			button = map[string]interface{}{
+			buttons[i] = map[string]interface{}{
 				"type":      2,
 				"label":     truncate(opt.Text, 80),
 				"style":     1,
 				"custom_id": opt.ID,
 			}
 		}
-
-		// Wrap THIS single button in its own Action Row
-		actionRow := map[string]interface{}{
-			"type":       1,
-			"components": []interface{}{button},
-		}
-		rows = append(rows, actionRow)
 	}
-	return rows
+	return []map[string]interface{}{{"type": 1, "components": buttons}}
 }
 
 // ── Utilities ─────────────────────────────────────────────────────────────────
