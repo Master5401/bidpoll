@@ -20,20 +20,37 @@ func NewPollRepo(db *sql.DB) *PollRepo {
 func (r *PollRepo) AttemptAtomicLock(ctx context.Context, optionID, userID string) error {
 	query := `
         UPDATE poll_options
-        SET state = 'LOCKED', held_by = $1, locked_at = NOW()
-        WHERE id = $2 AND state = 'FREE'
+        SET 
+            state = CASE WHEN state = 'FREE' THEN 'LOCKED' ELSE 'FREE' END,
+            held_by = CASE WHEN state = 'FREE' THEN $1 ELSE NULL END,
+            locked_at = CASE WHEN state = 'FREE' THEN NOW() ELSE NULL END
+        WHERE id = $2 
+        AND (
+            (state = 'FREE' AND NOT EXISTS (
+                SELECT 1 FROM poll_options po2 
+                WHERE po2.poll_id = poll_options.poll_id 
+                AND po2.held_by = $1 
+                AND po2.state = 'LOCKED'
+            )) 
+            OR 
+            (state = 'LOCKED' AND held_by = $1)
+        )
     `
+
 	result, err := r.db.ExecContext(ctx, query, userID, optionID)
 	if err != nil {
 		return fmt.Errorf("database error: %w", err)
 	}
+
 	rows, err := result.RowsAffected()
 	if err != nil {
 		return fmt.Errorf("rows affected check failed: %w", err)
 	}
+
 	if rows == 0 {
 		return domain.ErrOptionAlreadyClaimed
 	}
+
 	return nil
 }
 
