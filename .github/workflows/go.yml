@@ -25,3 +25,6 @@ jobs:
 
     - name: Test
       run: go test -v ./...
+    - name: Trigger Render Deployment
+      if: github.ref == 'refs/heads/main'
+      run: curl -X POST ${{ secrets.RENDER_DEPLOY_HOOK }}
