@@ -133,14 +133,14 @@ func (h *Handler) HandleInteraction(w http.ResponseWriter, r *http.Request) {
 	case 3:
 		w.Write([]byte(`{"type":6}`))
 		h.spawn(func() {
-			h.handleClaim(context.Background(), p.Data.CustomID, p.Member.User.ID, p.ChannelID, p.Message.ID)
+			h.handleClaim(context.Background(), p.Data.CustomID, p.Member.User.ID, p.ChannelID, p.Message.ID, p.Token)
 		})
 	default:
 		http.Error(w, "unknown interaction type", http.StatusBadRequest)
 	}
 }
 
-func (h *Handler) handleClaim(ctx context.Context, optionID, userID, channelID, messageID string) {
+func (h *Handler) handleClaim(ctx context.Context, optionID, userID, channelID, messageID, token string) {
 	err := h.engine.ClaimOption(ctx, inbound.ClaimOptionCommand{
 		OptionID:  optionID,
 		UserID:    userID,
@@ -150,9 +150,21 @@ func (h *Handler) handleClaim(ctx context.Context, optionID, userID, channelID, 
 	})
 	if err != nil {
 		log.Printf("[DISCORD] Claim rejected: %v", err)
+		// Fire a ghost message only the user can see
+		h.sendEphemeralWarning(token, "❌ **Action Denied.** You either already hold an option in this poll, or someone else locked this one first. Release yours to switch!")
 		return
 	}
 	h.refreshPollMessage(ctx, optionID, channelID, messageID)
+}
+
+func (h *Handler) sendEphemeralWarning(token, msg string) {
+	url := fmt.Sprintf("https://discord.com/api/v10/webhooks/%s/%s", h.appID, token)
+	payload := map[string]interface{}{
+		"content": msg,
+		"flags":   64, // 64 is the physical flag for an Ephemeral message
+	}
+	jsonData, _ := json.Marshal(payload)
+	http.Post(url, "application/json", bytes.NewBuffer(jsonData))
 }
 
 func (h *Handler) handleModalSubmit(ctx context.Context, w http.ResponseWriter, rawBody []byte, userID, channelID, token string) {
@@ -323,16 +335,14 @@ func buildUpdatedButtonRow(options []inbound.OptionView) []map[string]interface{
 	for i, opt := range options {
 		style := 1
 		label := truncate(opt.Text, 80)
-		disabled := false
 
 		if opt.State == "LOCKED" {
 			style = 2
 			label = truncate("🔒 "+opt.Text, 80)
-			disabled = true
 		}
 
 		currentRow = append(currentRow, map[string]interface{}{
-			"type": 2, "label": label, "style": style, "custom_id": opt.ID, "disabled": disabled,
+			"type": 2, "label": label, "style": style, "custom_id": opt.ID,
 		})
 
 		if len(currentRow) == 5 || i == len(options)-1 {
