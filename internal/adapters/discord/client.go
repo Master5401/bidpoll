@@ -10,7 +10,6 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -182,7 +181,7 @@ func (h *Handler) handleModalSubmit(ctx context.Context, w http.ResponseWriter, 
 	json.Unmarshal(rawBody, &modal)
 
 	question, optionsRaw := "", ""
-	durationHours := 24 // Fallback default if they leave it blank or type garbage
+	rawDuration := "24h" // Fallback default string
 
 	for _, row := range modal.Data.Components {
 		for _, field := range row.Components {
@@ -191,10 +190,7 @@ func (h *Handler) handleModalSubmit(ctx context.Context, w http.ResponseWriter, 
 			} else if field.CustomID == "input_options" {
 				optionsRaw = field.Value
 			} else if field.CustomID == "input_duration" && field.Value != "" {
-				parsed, err := strconv.Atoi(field.Value)
-				if err == nil && parsed >= 1 && parsed <= 168 {
-					durationHours = parsed
-				}
+				rawDuration = field.Value // Capture the raw string (e.g., "1h30m")
 			}
 		}
 	}
@@ -209,22 +205,40 @@ func (h *Handler) handleModalSubmit(ctx context.Context, w http.ResponseWriter, 
 		return
 	}
 
+	// Natively parse the complex time string into exact nanoseconds
+	duration, err := time.ParseDuration(rawDuration)
+	if err != nil {
+		duration = 24 * time.Hour // Fallback if they type garbage
+	}
+
+	// Defensive limits: minimum 1 minute, maximum 168 hours (1 week)
+	if duration < time.Minute {
+		duration = time.Minute
+	} else if duration > 168*time.Hour {
+		duration = 168 * time.Hour
+	}
+
+	// Pass the new Duration field to the engine
 	result, err := h.engine.CreatePoll(ctx, inbound.CreatePollCommand{
-		Question:      question,
-		Options:       options,
-		CreatedBy:     userID,
-		ChannelID:     channelID,
-		DurationHours: durationHours,
+		Question:  question,
+		Options:   options,
+		CreatedBy: userID,
+		ChannelID: channelID,
+		Duration:  duration, // This now correctly matches your updated struct
 	})
 	if err != nil {
 		w.Write([]byte(`{"type":4,"data":{"content":"❌ Failed to create poll.","flags":64}}`))
 		return
 	}
 
+	// Calculate the future Unix timestamp for Discord's native ticking UI clock
+	expiresAtUnix := time.Now().Add(duration).Unix()
+
 	response := map[string]interface{}{
 		"type": 4,
 		"data": map[string]interface{}{
-			"content":    fmt.Sprintf("📊 **%s**\n> *First come, first served. Ends in %d hours.*", question, durationHours),
+			// The <t:UNIX:R> tag forces Discord to render a live, ticking countdown on the user's screen
+			"content":    fmt.Sprintf("📊 **%s**\n> *First come, first served. Ends <t:%d:R>.*", question, expiresAtUnix),
 			"components": buildFreeButtonRow(result.Options),
 		},
 	}
@@ -232,7 +246,6 @@ func (h *Handler) handleModalSubmit(ctx context.Context, w http.ResponseWriter, 
 
 	h.spawn(func() { h.anchorPollToMessage(context.Background(), result.PollID, token) })
 }
-
 func (h *Handler) anchorPollToMessage(ctx context.Context, pollID, token string) {
 	url := fmt.Sprintf("https://discord.com/api/v10/webhooks/%s/%s/messages/@original", h.appID, token)
 	client := &http.Client{Timeout: 5 * time.Second}
@@ -316,7 +329,7 @@ func buildModalJSON() []byte {
             "components": [
                 {"type":1,"components":[{"type":4,"custom_id":"input_question","label":"Question","style":1,"min_length":5,"max_length":100,"required":true,"placeholder":"Who wins the championship?"}]},
                 {"type":1,"components":[{"type":4,"custom_id":"input_options","label":"Options (one per line, max 25)","style":2,"min_length":3,"max_length":500,"required":true,"placeholder":"Batman\nSuperman\nWonder Woman"}]},
-                {"type":1,"components":[{"type":4,"custom_id":"input_duration","label":"Duration in hours (1 to 168)","style":1,"min_length":1,"max_length":3,"required":false,"placeholder":"24"}]}
+                {"type":1,"components":[{"type":4,"custom_id":"input_duration","label":"Duration (e.g., 2h30m, 90m, 1h)","style":1,"min_length":2,"max_length":10,"required":false,"placeholder":"24h"}]}
             ]
         }
     }`)
