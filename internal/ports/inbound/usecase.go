@@ -14,11 +14,11 @@ type ClaimOptionCommand struct {
 }
 
 type CreatePollCommand struct {
-	Question  string
-	Options   []string
-	CreatedBy string
-	ChannelID string
-	Duration  int
+	Question      string
+	Options       []string
+	CreatedBy     string
+	ChannelID     string
+	durationHours int
 }
 
 // ── Read-side DTOs ────────────────────────────────────────────────────────────
