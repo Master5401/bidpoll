@@ -1,6 +1,9 @@
 package inbound
 
-import "context"
+import (
+	"context"
+	"time"
+)
 
 // ── Commands ──────────────────────────────────────────────────────────────────
 
@@ -14,11 +17,11 @@ type ClaimOptionCommand struct {
 }
 
 type CreatePollCommand struct {
-	Question      string
-	Options       []string
-	CreatedBy     string
-	ChannelID     string
-	DurationHours int
+	Question  string
+	Options   []string
+	CreatedBy string
+	ChannelID string
+	Duration  time.Duration
 }
 
 // ── Read-side DTOs ────────────────────────────────────────────────────────────
