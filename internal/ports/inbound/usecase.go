@@ -18,6 +18,7 @@ type CreatePollCommand struct {
 	Options   []string
 	CreatedBy string
 	ChannelID string
+	Duration  int
 }
 
 // ── Read-side DTOs ────────────────────────────────────────────────────────────

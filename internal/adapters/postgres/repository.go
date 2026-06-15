@@ -54,10 +54,15 @@ func (r *PollRepo) AttemptAtomicLock(ctx context.Context, optionID, userID strin
 	return nil
 }
 
-func (r *PollRepo) CreatePoll(ctx context.Context, title, createdBy, channelID string) (string, error) {
+func (r *PollRepo) CreatePoll(ctx context.Context, title, createdBy, channelID string, durationHours int) (string, error) {
 	var id string
-	query := `INSERT INTO polls (title, created_by, channel_id) VALUES ($1, $2, $3) RETURNING id`
-	err := r.db.QueryRowContext(ctx, query, title, createdBy, channelID).Scan(&id)
+	// We use Postgres math: NOW() + (duration * 1 hour)
+	query := `
+        INSERT INTO polls (title, created_by, channel_id, expires_at) 
+        VALUES ($1, $2, $3, NOW() + $4 * INTERVAL '1 hour') 
+        RETURNING id
+    `
+	err := r.db.QueryRowContext(ctx, query, title, createdBy, channelID, durationHours).Scan(&id)
 	if err != nil {
 		return "", fmt.Errorf("failed to insert poll: %w", err)
 	}

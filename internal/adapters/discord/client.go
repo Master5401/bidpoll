@@ -10,6 +10,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -181,12 +182,19 @@ func (h *Handler) handleModalSubmit(ctx context.Context, w http.ResponseWriter, 
 	json.Unmarshal(rawBody, &modal)
 
 	question, optionsRaw := "", ""
+	durationHours := 24 // Fallback default if they leave it blank or type garbage
+
 	for _, row := range modal.Data.Components {
 		for _, field := range row.Components {
 			if field.CustomID == "input_question" {
 				question = field.Value
 			} else if field.CustomID == "input_options" {
 				optionsRaw = field.Value
+			} else if field.CustomID == "input_duration" && field.Value != "" {
+				parsed, err := strconv.Atoi(field.Value)
+				if err == nil && parsed >= 1 && parsed <= 168 {
+					durationHours = parsed
+				}
 			}
 		}
 	}
@@ -202,10 +210,11 @@ func (h *Handler) handleModalSubmit(ctx context.Context, w http.ResponseWriter, 
 	}
 
 	result, err := h.engine.CreatePoll(ctx, inbound.CreatePollCommand{
-		Question:  question,
-		Options:   options,
-		CreatedBy: userID,
-		ChannelID: channelID,
+		Question:      question,
+		Options:       options,
+		CreatedBy:     userID,
+		ChannelID:     channelID,
+		DurationHours: durationHours,
 	})
 	if err != nil {
 		w.Write([]byte(`{"type":4,"data":{"content":"❌ Failed to create poll.","flags":64}}`))
@@ -215,7 +224,7 @@ func (h *Handler) handleModalSubmit(ctx context.Context, w http.ResponseWriter, 
 	response := map[string]interface{}{
 		"type": 4,
 		"data": map[string]interface{}{
-			"content":    fmt.Sprintf("📊 **%s**\n> *First come, first served — claim your pick below. Only you can release your claim.*", question),
+			"content":    fmt.Sprintf("📊 **%s**\n> *First come, first served. Ends in %d hours.*", question, durationHours),
 			"components": buildFreeButtonRow(result.Options),
 		},
 	}
@@ -306,7 +315,8 @@ func buildModalJSON() []byte {
             "custom_id": "modal_create_poll",
             "components": [
                 {"type":1,"components":[{"type":4,"custom_id":"input_question","label":"Question","style":1,"min_length":5,"max_length":100,"required":true,"placeholder":"Who wins the championship?"}]},
-                {"type":1,"components":[{"type":4,"custom_id":"input_options","label":"Options (one per line, max 25)","style":2,"min_length":3,"max_length":500,"required":true,"placeholder":"Batman\nSuperman\nWonder Woman"}]}
+                {"type":1,"components":[{"type":4,"custom_id":"input_options","label":"Options (one per line, max 25)","style":2,"min_length":3,"max_length":500,"required":true,"placeholder":"Batman\nSuperman\nWonder Woman"}]},
+                {"type":1,"components":[{"type":4,"custom_id":"input_duration","label":"Duration in hours (1 to 168)","style":1,"min_length":1,"max_length":3,"required":false,"placeholder":"24"}]}
             ]
         }
     }`)
