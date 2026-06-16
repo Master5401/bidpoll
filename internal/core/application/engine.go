@@ -35,6 +35,9 @@ func (e *PollEngine) ClaimOption(ctx context.Context, cmd inbound.ClaimOptionCom
 }
 
 func (e *PollEngine) CreatePoll(ctx context.Context, cmd inbound.CreatePollCommand) (*inbound.CreatePollResult, error) {
+
+	expiresAt := time.Now().Add(cmd.Duration)
+
 	pollID, err := e.repo.CreatePoll(ctx, cmd.Question, cmd.CreatedBy, cmd.ChannelID, expiresAt)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create poll: %w", err)
