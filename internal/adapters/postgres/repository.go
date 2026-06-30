@@ -20,21 +20,25 @@ func NewPollRepo(db *sql.DB) *PollRepo {
 
 func (r *PollRepo) AttemptAtomicLock(ctx context.Context, optionID, userID string) error {
 	query := `
-        UPDATE poll_options
-        SET 
-            state = CASE WHEN state = 'FREE' THEN 'LOCKED' ELSE 'FREE' END,
-            held_by = CASE WHEN state = 'FREE' THEN $1 ELSE NULL END,
-            locked_at = CASE WHEN state = 'FREE' THEN NOW() ELSE NULL END
-        WHERE id = $2 
+        UPDATE poll_options po
+        SET
+            state     = CASE WHEN po.state = 'FREE' THEN 'LOCKED' ELSE 'FREE' END,
+            held_by   = CASE WHEN po.state = 'FREE' THEN $1 ELSE NULL END,
+            locked_at = CASE WHEN po.state = 'FREE' THEN NOW() ELSE NULL END
+        FROM polls p
+        WHERE po.id = $2
+        AND po.poll_id = p.id
+        AND p.expires_at > NOW()
+        AND p.is_locked = FALSE
         AND (
-            (state = 'FREE' AND NOT EXISTS (
-                SELECT 1 FROM poll_options po2 
-                WHERE po2.poll_id = poll_options.poll_id 
-                AND po2.held_by = $1 
+            (po.state = 'FREE' AND NOT EXISTS (
+                SELECT 1 FROM poll_options po2
+                WHERE po2.poll_id = po.poll_id
+                AND po2.held_by = $1
                 AND po2.state = 'LOCKED'
-            )) 
-            OR 
-            (state = 'LOCKED' AND held_by = $1)
+            ))
+            OR
+            (po.state = 'LOCKED' AND po.held_by = $1)
         )
     `
 
@@ -49,6 +53,8 @@ func (r *PollRepo) AttemptAtomicLock(ctx context.Context, optionID, userID strin
 	}
 
 	if rows == 0 {
+		// Could be: already claimed by someone else, poll expired, or poll closed early.
+		// A more granular check can disambiguate this in a follow-up query if needed.
 		return domain.ErrOptionAlreadyClaimed
 	}
 
@@ -57,10 +63,9 @@ func (r *PollRepo) AttemptAtomicLock(ctx context.Context, optionID, userID strin
 
 func (r *PollRepo) CreatePoll(ctx context.Context, title, createdBy, channelID string, expiresAt time.Time) (string, error) {
 	var id string
-	// Notice we replaced the NOW() math with a direct $4 injection
 	query := `
-        INSERT INTO polls (title, created_by, channel_id, expires_at) 
-        VALUES ($1, $2, $3, $4) 
+        INSERT INTO polls (title, created_by, channel_id, expires_at)
+        VALUES ($1, $2, $3, $4)
         RETURNING id
     `
 	err := r.db.QueryRowContext(ctx, query, title, createdBy, channelID, expiresAt).Scan(&id)
@@ -69,6 +74,7 @@ func (r *PollRepo) CreatePoll(ctx context.Context, title, createdBy, channelID s
 	}
 	return id, nil
 }
+
 func (r *PollRepo) AddOption(ctx context.Context, pollID, text string) (string, error) {
 	var id string
 	query := `INSERT INTO poll_options (poll_id, text) VALUES ($1, $2) RETURNING id`
@@ -93,6 +99,7 @@ func (r *PollRepo) GetPollWithOptions(ctx context.Context, optionID string) (*do
             p.created_by,
             COALESCE(p.channel_id, '') AS channel_id,
             COALESCE(p.message_id, '') AS message_id,
+            p.expires_at,
             po.id       AS opt_id,
             po.text     AS opt_text,
             po.state    AS opt_state,
@@ -112,11 +119,12 @@ func (r *PollRepo) GetPollWithOptions(ctx context.Context, optionID string) (*do
 	for rows.Next() {
 		var (
 			pollID, title, createdBy, channelID, messageID string
+			expiresAt                                      time.Time
 			optID, optText, optState                       string
 			heldBy                                         *string
 		)
 		if err := rows.Scan(
-			&pollID, &title, &createdBy, &channelID, &messageID,
+			&pollID, &title, &createdBy, &channelID, &messageID, &expiresAt,
 			&optID, &optText, &optState, &heldBy,
 		); err != nil {
 			return nil, fmt.Errorf("scan failed: %w", err)
@@ -128,6 +136,7 @@ func (r *PollRepo) GetPollWithOptions(ctx context.Context, optionID string) (*do
 				CreatedBy: createdBy,
 				ChannelID: channelID,
 				MessageID: messageID,
+				ExpiresAt: expiresAt,
 			}
 		}
 		poll.Options = append(poll.Options, domain.PollOption{

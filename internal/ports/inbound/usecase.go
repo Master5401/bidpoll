@@ -40,8 +40,11 @@ type CreatePollResult struct {
 
 type PollView struct {
 	ID        string
+	Question  string
+	CreatedBy string
 	ChannelID string
 	MessageID string
+	ExpiresAt time.Time
 	Options   []OptionView
 }
 

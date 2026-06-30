@@ -68,8 +68,11 @@ func (e *PollEngine) GetPollByOptionID(ctx context.Context, optionID string) (*i
 	}
 	view := &inbound.PollView{
 		ID:        poll.ID,
+		Question:  poll.Title,
+		CreatedBy: poll.CreatedBy,
 		ChannelID: poll.ChannelID,
 		MessageID: poll.MessageID,
+		ExpiresAt: poll.ExpiresAt,
 	}
 	for _, opt := range poll.Options {
 		view.Options = append(view.Options, inbound.OptionView{

@@ -283,12 +283,40 @@ func (h *Handler) refreshPollMessage(ctx context.Context, optionID, channelID, m
 
 	poll, err := h.engine.GetPollByOptionID(ctx, optionID)
 	if err != nil {
+		log.Printf("[DISCORD] Failed to fetch poll state for ledger: %v", err)
 		return
 	}
 
-	patchBody := map[string]interface{}{"components": buildUpdatedButtonRow(poll.Options)}
+	// 1. Initialize the high-performance memory builder
+	var ledger strings.Builder
+
+	// Assuming your poll object has Question and ExpiresAt fields exported.
+	// Adjust the variable names (e.g., poll.Title) if your struct uses different labels.
+	expiresAtUnix := poll.ExpiresAt.Unix()
+
+	// 2. Build the Header
+	ledger.WriteString(fmt.Sprintf("📊 **%s**\n> *First come, first served. Ends <t:%d:t> (<t:%d:R>).*\n\n**Live Roster:**\n", poll.Question, expiresAtUnix, expiresAtUnix))
+
+	// 3. Build the Rows
+	for _, opt := range poll.Options {
+		if opt.State == "LOCKED" && opt.HeldBy != nil && *opt.HeldBy != "" {
+			ledger.WriteString(fmt.Sprintf("> 🔒 **%s** — claimed by <@%s>\n", opt.Text, *opt.HeldBy))
+		} else if opt.State == "LOCKED" {
+			// Fallback just in case HeldBy is missing
+			ledger.WriteString(fmt.Sprintf("> 🔒 **%s** — claimed\n", opt.Text))
+		} else {
+			ledger.WriteString(fmt.Sprintf("> 🟢 **%s**\n", opt.Text))
+		}
+	}
+
+	// 4. Forge the dual-payload (Text + Buttons)
+	patchBody := map[string]interface{}{
+		"content":    ledger.String(),
+		"components": buildUpdatedButtonRow(poll.Options),
+	}
 	jsonData, _ := json.Marshal(patchBody)
 
+	// 5. Strike the Discord API
 	url := fmt.Sprintf("https://discord.com/api/v10/channels/%s/messages/%s", channelID, messageID)
 	h.patchWithRateLimit(url, jsonData)
 }
